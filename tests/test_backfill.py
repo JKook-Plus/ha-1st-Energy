@@ -7,8 +7,9 @@ the whole walk again.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from itertools import pairwise
+from zoneinfo import ZoneInfo
 
 import pytest
 from homeassistant.components.recorder.statistics import statistics_during_period
@@ -42,6 +43,9 @@ NMI = "9999990001"
 KWH_PER_SLOT = 0.01
 HOUR_KWH = 12 * KWH_PER_SLOT
 HISTORY_DAYS = 90
+# NSW, so the coordinator reads each day in Sydney time. The history window
+# can span a daylight saving change, whose day has 23 or 25 hours.
+SYDNEY = ZoneInfo("Australia/Sydney")
 
 SERVICE_POINT = ServicePoint(
     service_point_id="663701", nmi=NMI, status="ACTIVE", jurisdiction_code="NSW",
@@ -51,14 +55,28 @@ SERVICE_POINT = ServicePoint(
 )
 
 
+def day_hours(day: date) -> int:
+    """Hours in a Sydney day: 24, or 23 or 25 when the clocks change."""
+    start = datetime.combine(day, time(), SYDNEY).astimezone(UTC)
+    end = datetime.combine(day + timedelta(days=1), time(), SYDNEY).astimezone(UTC)
+    return int((end - start) / timedelta(hours=1))
+
+
+def hours_between(oldest: date, newest: date) -> int:
+    return sum(day_hours(oldest + timedelta(days=i))
+               for i in range((newest - oldest).days + 1))
+
+
 def usage_day(day: date) -> UsageDay:
+    """A day of reads, with as many slots as the day has, as the meter sends."""
+    slots = day_hours(day) * 12
     return UsageDay(
         service_point_id="663701", register_id="E1", read_date=day,
         unit_of_measure="kWh", controlled_load=False, interval_minutes=5,
-        energy_kwh=KWH_PER_SLOT * 288, cost_aud=0.001 * 288,
-        intervals=tuple([KWH_PER_SLOT] * 288),
-        costings=tuple([0.001] * 288),
-        tou=tuple(["Off Peak"] * 288),
+        energy_kwh=KWH_PER_SLOT * slots, cost_aud=0.001 * slots,
+        intervals=tuple([KWH_PER_SLOT] * slots),
+        costings=tuple([0.001] * slots),
+        tou=tuple(["Off Peak"] * slots),
     )
 
 
@@ -90,6 +108,16 @@ class FakeClient:
 def newest() -> date:
     """The coordinator backfills up to yesterday."""
     return dt_util.now().date() - timedelta(days=1)
+
+
+@pytest.fixture
+def oldest(newest) -> date:
+    return newest - timedelta(days=HISTORY_DAYS - 1)
+
+
+@pytest.fixture
+def history_hours(oldest, newest) -> int:
+    return hours_between(oldest, newest)
 
 
 @pytest.fixture
@@ -138,13 +166,14 @@ def assert_monotonic(rows: list[dict]) -> None:
 
 class TestStreaming:
     async def test_a_complete_backfill_imports_all_history(
-        self, recorder_mock, enable_custom_integrations, hass, coordinator, entry
+        self, recorder_mock, enable_custom_integrations, hass, coordinator, entry,
+        history_hours,
     ):
         await coordinator._async_backfill(SERVICE_POINT)
 
         rows = await stored(hass)
-        assert len(rows) == HISTORY_DAYS * 24
-        assert rows[-1]["sum"] == pytest.approx(HISTORY_DAYS * 24 * HOUR_KWH)
+        assert len(rows) == history_hours
+        assert rows[-1]["sum"] == pytest.approx(history_hours * HOUR_KWH)
         assert entry.data[CONF_BACKFILL_DONE] is True
         assert CONF_BACKFILL_CURSOR not in entry.data
 
@@ -157,20 +186,20 @@ class TestStreaming:
 
     async def test_a_failure_keeps_the_chunks_already_written(
         self, recorder_mock, enable_custom_integrations, hass, coordinator, client, entry,
-        third_chunk,
+        oldest, third_chunk,
     ):
         client.fail_from = third_chunk
         await coordinator._async_backfill(SERVICE_POINT)
 
         rows = await stored(hass)
-        assert len(rows) == 60 * 24
+        assert len(rows) == hours_between(oldest, third_chunk - timedelta(days=1))
         assert_monotonic(rows)
         assert entry.data[CONF_BACKFILL_CURSOR] == third_chunk.isoformat()
         assert not entry.data.get(CONF_BACKFILL_DONE)
 
     async def test_the_next_attempt_resumes_after_them(
         self, recorder_mock, enable_custom_integrations, hass, coordinator, client, entry,
-        third_chunk,
+        third_chunk, history_hours,
     ):
         third = third_chunk
         client.fail_from = third
@@ -182,13 +211,14 @@ class TestStreaming:
 
         assert client.windows[0][0] == third
         rows = await stored(hass)
-        assert len(rows) == HISTORY_DAYS * 24
-        assert rows[-1]["sum"] == pytest.approx(HISTORY_DAYS * 24 * HOUR_KWH)
+        assert len(rows) == history_hours
+        assert rows[-1]["sum"] == pytest.approx(history_hours * HOUR_KWH)
         assert_monotonic(rows)
         assert entry.data[CONF_BACKFILL_DONE] is True
 
     async def test_meeting_the_rolling_window_never_decreases_the_sum(
-        self, recorder_mock, enable_custom_integrations, hass, coordinator, newest
+        self, recorder_mock, enable_custom_integrations, hass, coordinator, newest,
+        history_hours,
     ):
         """The rolling poll writes the last few days before the backfill starts."""
         await coordinator._async_import(
@@ -197,9 +227,9 @@ class TestStreaming:
         await coordinator._async_backfill(SERVICE_POINT)
 
         rows = await stored(hass)
-        assert len(rows) == HISTORY_DAYS * 24
+        assert len(rows) == history_hours
         assert_monotonic(rows)
-        assert rows[-1]["sum"] == pytest.approx(HISTORY_DAYS * 24 * HOUR_KWH)
+        assert rows[-1]["sum"] == pytest.approx(history_hours * HOUR_KWH)
 
 
 class TestBackoff:
