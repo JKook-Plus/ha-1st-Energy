@@ -6,6 +6,9 @@ Pulls your electricity usage and cost from 1st Energy into Home Assistant's
 **Energy dashboard**, with hourly detail and full history back to the day
 your account was opened.
 
+Forked from [FoxClock/1stEnergy-Assistant](https://github.com/FoxClock/1stEnergy-Assistant),
+where this integration started.
+
 > **Unofficial and independent.** This project is not affiliated with,
 > endorsed by, or sponsored by 1st Energy Pty Ltd, who provide no support
 > for it. "1st Energy" and the 1st Energy logo are their trademarks, used
@@ -303,7 +306,8 @@ Consequences worth knowing:
 
 ## Licence
 
-The **code** is MIT; see [Licence](Licence).
+The **code** is MIT, copyright FoxClock, who wrote the original; see
+[Licence](Licence).
 
 That licence does not extend to 1st Energy's trademarks or logo, which
 remain their property. If you fork or redistribute this, the marks are
